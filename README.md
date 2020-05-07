@@ -15,7 +15,9 @@ Set `KUBECTL_OIDC_IDP_ISSUER_URL`, `KUBECTL_OIDC_CLIENT_ID`, `KUBECTL_OIDC_CLIEN
 OIDC environment.
 
 ```
-curl -o /usr/local/bin/kubectl-oidc https://raw.githubusercontent.com/christian-2/kubectl-oidc/master/kubectl-oidc`
+curl -o /usr/local/bin/kubectl-oidc \
+  https://raw.githubusercontent.com/christian-2/kubectl-oidc/master/kubectl-oidc
+chmod a+x /usr/local/bin/kubectl-oidc
 pip3 install pyyaml
 cat >/etc/profile.d/kubectl-oidc.sh <<EOF
 KUBECTL_OIDC_IDP_ISSUER_URL=...
