@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+
+import argparse
+import getpass
+import logging
+import os
+import os.path
+import urllib.error
+import urllib.parse
+import urllib.request
+import yaml
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+logger.addHandler(logging.StreamHandler())
+
+class Kubeconfig:
+  def __init__(self):
+    if 'KUBECONFIG' in os.environ:
+      self.path = os.environ['KUBECONFIG']
+    else:
+      self.path = os.path.join(os.environ['HOME'], '.kube', 'config')
+    logger.debug('path={}'.format(self.path))
+    with open(self.path) as stream:
+      self.d = yaml.load(stream, Loader=yaml.FullLoader)
+      c = next(filter(lambda c: c['name'] == self.d['current-context'], self.d['contexts']), None)
+      self.username = c['context']['user']
+      u = next(filter(lambda u: u['name'] == self.username, self.d['users']), None) if 'users' in self.d else None
+      if not u:
+        raise Exception('user {} not defined in {}'.format(self.username, path))
+      if u['user']['auth-provider']['name'] != 'oidc':
+        raise Exception('auth-provider oidc not defined for user {} in {}'.format(self.username, path))
+      self.c = u['user']['auth-provider']['config']
+      self.idp_issuer_url = self.c['idp-issuer-url'] if 'idp-issuer-url' in self.c else None
+      self.client_id = self.c['client-id'] if 'client-id' in self.c else None
+      self.client_secret = self.c['client-secret'] if 'client-secret' in self.c else None
+      self.id_token = self.c['id-token'] if 'id-token' in self.c else None
+      self.refresh_token = self.c['refresh-token'] if 'refresh-token' in self.c else None
+      logger.debug('idp_issuer_url={}'.format(self.idp_issuer_url))
+      logger.debug('client_id={}'.format(self.client_id))
+      logger.debug('client_secret={}'.format(self.client_secret))
+      logger.debug('id_token={}'.format(self.id_token))
+      logger.debug('refresh_token={}'.format(self.refresh_token))
+
+  def set_oidc_credentials(self, id_token, refresh_token):
+    logger.debug('id_token={}'.format(id_token))
+    logger.debug('refresh_token={}'.format(refresh_token))
+    self.id_token = id_token
+    self.refresh_token = refresh_token
+    if id_token:
+      self.c['id-token'] = id_token
+    else:
+      self.c.pop('id-token', None)
+    if refresh_token:
+      self.c['refresh-token'] = refresh_token
+    else:
+      self.c.pop('refresh-token', None)
+    with open(self.path, 'w') as stream:
+      logger.debug('updating {}'.format(self.path))
+      yaml.dump(self.d, stream)
+
+class Oidc:
+  def __init__(self, kubeconfig):
+    self.kubeconfig = kubeconfig
+    u = kubeconfig.idp_issuer_url + '/.well-known/openid-configuration'
+    with urllib.request.urlopen(u) as response:
+      d = yaml.load(response.read(), Loader=yaml.FullLoader)
+      self.token_endpoint = d['token_endpoint']
+      self.end_session_endpoint = d['end_session_endpoint']
+      logger.debug('token_endpoint={}'.format(self.token_endpoint))
+      logger.debug('end_session_endpoint={}'.format(self.end_session_endpoint))
+
+  def login(self, username, password):
+    logger.debug('username={}'.format(username))
+    if username != self.kubeconfig.username:
+      raise Exception('current context in {} does reference user {}'.format(self.kubeconfig.path, username))
+    grant_type = 'password'
+    scope = 'openid'
+    d = {'client_id':self.kubeconfig.client_id, 'client_secret':self.kubeconfig.client_secret,
+      'grant_type':grant_type, 'password':password, 'scope':scope, 'username':username}
+    request = urllib.request.Request(self.token_endpoint, data=urllib.parse.urlencode(d).encode())
+    request.add_header('ContentType', 'application/x-www-form-urlencoded')
+    try:
+      with urllib.request.urlopen(request) as response:
+        d = yaml.load(response.read(), Loader=yaml.FullLoader)
+        id_token = d['id_token']
+        refresh_token = d['refresh_token']
+        self.kubeconfig.set_oidc_credentials(id_token, refresh_token)
+    except urllib.error.HTTPError as e:
+      raise Exception('{} {} {}'.format(e.code, e.reason, e.read().decode()))
+
+  def logout(self):
+    if self.kubeconfig.id_token:
+      d = {'client_id':self.kubeconfig.client_id, 'client_secret':self.kubeconfig.client_secret,
+        'refresh_token': self.kubeconfig.refresh_token, 'id_token_hint': self.kubeconfig.id_token}
+      request = urllib.request.Request(self.end_session_endpoint, data=urllib.parse.urlencode(d).encode())
+      request.add_header('Authorization', 'Bearer ' + self.kubeconfig.id_token)
+      request.add_header('ContentType', 'application/x-www-form-urlencoded')
+      try:
+        urllib.request.urlopen(request)
+        self.kubeconfig.set_oidc_credentials(None, None)
+      except urllib.error.HTTPError as e:
+        raise Exception('{} {} {}'.format(e.code, e.reason, e.read().decode()))
+
+def main():
+  def args():
+    parser = argparse.ArgumentParser(description = 'OIDC authentication')
+    parser.add_argument('command', choices=['login','logout'])
+    parser.add_argument('username', nargs='?')
+    args = parser.parse_args()
+    if (args.command == 'login' and args.username == None or
+        args.command == 'logout' and args.username):
+      parser.print_help()
+      parser.exit()
+    return parser, args.command, args.username
+
+  try:
+    parser, command, username = args()
+    kubeconfig = Kubeconfig()
+    oidc = Oidc(kubeconfig)
+    if command == 'login':
+      password = getpass.getpass('Password: ')
+      oidc.login(username, password)
+    elif command == 'logout':
+      oidc.logout()
+  except Exception as e:
+    print(e)
+
+if __name__ == "__main__":
+  main()
