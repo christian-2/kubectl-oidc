@@ -73,7 +73,7 @@ class Oidc:
   def login(self, username, password):
     logger.debug('username={}'.format(username))
     if username != self.kubeconfig.username:
-      raise Exception('current context in {} does reference user {}'.format(self.kubeconfig.path, username))
+      raise Exception('current context in {} does not reference user {}'.format(self.kubeconfig.path, username))
     grant_type = 'password'
     scope = 'openid'
     d = {'client_id':self.kubeconfig.client_id, 'client_secret':self.kubeconfig.client_secret,
